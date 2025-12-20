@@ -618,7 +618,7 @@ class DisplayBoard(tk.Frame, chess.Board):
         self._selected_square = None
         self.redraw()
 
-    def _generate_svg(self) -> str:
+    def generate_svg(self,highlights:bool=True,circles:bool=True,arrows:bool=True) -> str:
         """Draw the board as SVG."""
         square_size = self.square_size
         board_size = self.board_size
@@ -635,13 +635,14 @@ class DisplayBoard(tk.Frame, chess.Board):
                 hex_color = self._rgb_to_hex(color)
                 svg+=f'<rect x="{x}" y="{y}" width="{square_size}" height="{square_size}" fill="{hex_color}" />\n'
 
-        # Draw highlights
-        for r, c, color in self.highlights:
-            rr, cc = (7 - r, 7 - c) if self.flipped else (r, c)
-            x = cc * square_size
-            y = rr * square_size
-            hex_color = self._rgb_to_hex(color)
-            svg+=f'<rect x="{x}" y="{y}" width="{square_size}" height="{square_size}" fill="none" stroke="{hex_color}" stroke-width="3"/>\n'
+        if highlights:
+            # Draw highlights
+            for r, c, color in self.highlights:
+                rr, cc = (7 - r, 7 - c) if self.flipped else (r, c)
+                x = cc * square_size
+                y = rr * square_size
+                hex_color = self._rgb_to_hex(color)
+                svg+=f'<rect x="{x}" y="{y}" width="{square_size}" height="{square_size}" fill="none" stroke="{hex_color}" stroke-width="3"/>\n'
 
         # Draw pieces (as text)
         font_size = int(square_size * 0.7)
@@ -656,50 +657,57 @@ class DisplayBoard(tk.Frame, chess.Board):
                     symbol = self.UNICODE_PIECES[piece.symbol()]
                     svg+=f'<text x="{cx}" y="{cy}" font-size="{font_size}" text-anchor="middle" dominant-baseline="middle">{symbol}</text>\n'
 
-        # Draw circles
-        for r, c, color, radius, width in self.circles:
-            rr, cc = (7 - r, 7 - c) if self.flipped else (r, c)
-            cx = cc * square_size + square_size / 2
-            cy = rr * square_size + square_size / 2
-            hex_color = self._rgb_to_hex(color)
-            svg+=f'<circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="{hex_color}" stroke-width="{width}"/>\n'
+        if circles:
+            # Draw circles
+            for r, c, color, radius, width in self.circles:
+                rr, cc = (7 - r, 7 - c) if self.flipped else (r, c)
+                cx = cc * square_size + square_size / 2
+                cy = rr * square_size + square_size / 2
+                hex_color = self._rgb_to_hex(color)
+                svg+=f'<circle cx="{cx}" cy="{cy}" r="{radius}" fill="none" stroke="{hex_color}" stroke-width="{width}"/>\n'
 
-        # Draw arrows (simple lines, בלי ראש חץ מורכב)
-        for fr, fc, tr, tc, color, width in self.arrows:
-            fr, fc = (7 - fr, 7 - fc) if self.flipped else (fr, fc)
-            tr, tc = (7 - tr, 7 - tc) if self.flipped else (tr, tc)
-            x1 = fc * square_size + square_size / 2
-            y1 = fr * square_size + square_size / 2
-            x2 = tc * square_size + square_size / 2
-            y2 = tr * square_size + square_size / 2
-            hex_color = self._rgb_to_hex(color)
-            dx = x2 - x1
-            dy = y2 - y1
-            angle = math.atan2(dy, dx)
-            arrow_size = self.square_size / 2
-            arrow_angle = math.radians(35)
+        if arrows:
+            # Draw arrows
+            for fr, fc, tr, tc, color, width in self.arrows:
+                fr, fc = (7 - fr, 7 - fc) if self.flipped else (fr, fc)
+                tr, tc = (7 - tr, 7 - tc) if self.flipped else (tr, tc)
+                x1 = fc * square_size + square_size / 2
+                y1 = fr * square_size + square_size / 2
+                x2 = tc * square_size + square_size / 2
+                y2 = tr * square_size + square_size / 2
+                hex_color = self._rgb_to_hex(color)
+                dx = x2 - x1
+                dy = y2 - y1
+                angle = math.atan2(dy, dx)
+                arrow_size = self.square_size / 2
+                arrow_angle = math.radians(35)
 
-            left = (
-                x2 - arrow_size * math.cos(angle - arrow_angle),
-                y2 - arrow_size * math.sin(angle - arrow_angle)
-            )
-            right = (
-                x2 - arrow_size * math.cos(angle + arrow_angle),
-                y2 - arrow_size * math.sin(angle + arrow_angle)
-            )
+                left = (
+                    x2 - arrow_size * math.cos(angle - arrow_angle),
+                    y2 - arrow_size * math.sin(angle - arrow_angle)
+                )
+                right = (
+                    x2 - arrow_size * math.cos(angle + arrow_angle),
+                    y2 - arrow_size * math.sin(angle + arrow_angle)
+                )
 
-            svg+=(
-                f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{hex_color}" stroke-width="{width}"/>\n'
-                f'<line x1="{x2}" y1="{y2}" x2="{left[0]}" y2="{left[1]}" stroke="{hex_color}" stroke-width="{width}"/>\n'
-                f'<line x1="{x2}" y1="{y2}" x2="{right[0]}" y2="{right[1]}" stroke="{hex_color}" stroke-width="{width}"/>\n'
-            )
+                svg+=(
+                    f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{hex_color}" stroke-width="{width}"/>\n'
+                    f'<line x1="{x2}" y1="{y2}" x2="{left[0]}" y2="{left[1]}" stroke="{hex_color}" stroke-width="{width}"/>\n'
+                    f'<line x1="{x2}" y1="{y2}" x2="{right[0]}" y2="{right[1]}" stroke="{hex_color}" stroke-width="{width}"/>\n'
+                )
+
         svg+="</svg>"
         return svg
 
-    def export_svg(self, path: str):
+    def export_svg(self, path: str,highlights:bool=True,circles:bool=True,arrows:bool=True) -> bool:
             """Export the board as SVG."""
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(self._generate_svg())
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(self._generate_svg(highlights, circles, arrows))
+                return True
+            except OSError:
+                return False
 
 
 
