@@ -19,7 +19,8 @@ import math
 import chess
 import tkinter as tk
 from chess import Move
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, override
+
 
 class DisplayBoard(tk.Frame, chess.Board):
     """
@@ -704,19 +705,333 @@ class DisplayBoard(tk.Frame, chess.Board):
             """Export the board as SVG."""
             try:
                 with open(path, 'w', encoding='utf-8') as f:
-                    f.write(self._generate_svg(highlights, circles, arrows))
+                    f.write(self.generate_svg(highlights, circles, arrows))
                 return True
             except OSError:
                 return False
 
+    def set_readonly(self, value: bool):
+        self.allow_input = not value
+        self.allow_dragging = not value
+        self.allow_drawing = not value
+        self._dragging_offset = (0,0)
+        self._dragging_piece = None
+        self._promotion_active = False
+        self._waiting_move = None
+        self.redraw()
 
+class AnimatedDisplayBoard(DisplayBoard):
+    """DisplayBoard with smooth small animations. New animation kills previous one."""
+
+    def __init__(self, *args,
+                 animation_fps: int = 60,
+                 animation_duration: float = 0.20,
+                 allow_animation: bool = True,
+                 **kwargs):
+        # --- initialize animation-related attributes BEFORE calling super()
+        # to avoid AttributeError if DisplayBoard.__init__ calls redraw()
+        self.animation_fps = max(1, int(animation_fps))
+        self.animation_duration = max(0.0, float(animation_duration))
+        self.allow_animation = bool(allow_animation)
+
+        self._animating: bool = False
+        self._anim_after_id  = None
+        self._anim_data = None
+
+        # derived interval (ms)
+        self._anim_frame_interval_ms = int(1000 / max(1, self.animation_fps))
+
+        # now initialize parent (which will call redraw)
+        super().__init__(*args, **kwargs)
+
+    # --------------------
+    # Easing / helpers
+    # --------------------
+    @staticmethod
+    def _ease_out_quad(t: float) -> float:
+        """Ease-out quadratic: t in [0,1] -> [0,1]."""
+        return 1 - (1 - t) * (1 - t)
+
+    def _frames_for_duration(self, duration: Optional[float] = None) -> int:
+        d = self.animation_duration if duration is None else duration
+        return max(1, int(round(d * self.animation_fps)))
+
+    # --------------------
+    # Animation control
+    # --------------------
+    def stop_animation(self):
+        """Immediately stop current animation and, if an anim move exists, execute it."""
+        # cancel scheduled callback
+        if self._anim_after_id:
+            try:
+                self.after_cancel(self._anim_after_id)
+            except Exception:
+                pass
+            self._anim_after_id = None
+
+        # stop anim state
+        self._animating = False
+
+        # if there is an in-progress animation and it contained a move, commit it now
+        if self._anim_data and "move" in self._anim_data:
+            move = self._anim_data.get("move")
+            # clear anim data before committing (avoid re-entry issues)
+            self._anim_data = None
+            try:
+                # call DisplayBoard.push to bypass our override and avoid recursion
+                DisplayBoard.push(self, move)
+            except Exception:
+                # as fallback try super().push
+                try:
+                    super().push(move)
+                except Exception:
+                    pass
+
+        # redraw to clear any animated overlays
+        try:
+            self.redraw()
+        except Exception:
+            pass
+
+    def _start_move_animation(self, move: chess.Move):
+        """Start animating the given move (cancels any previous animation)."""
+        # cancel any existing animation and commit its move first (stop_animation)
+        if self._animating:
+            self.stop_animation()
+
+        # if animations disabled -> immediate push
+        if not self.allow_animation:
+            DisplayBoard.push(self, move)
+            return
+
+        # sanity check
+        if not isinstance(move, chess.Move):
+            DisplayBoard.push(self, move)
+            return
+
+        from_sq = move.from_square
+        to_sq = move.to_square
+
+        piece = self.piece_at(from_sq)
+        if piece is None:
+            # nothing to animate; just perform the push
+            DisplayBoard.push(self, move)
+            return
+
+        frames = self._frames_for_duration()
+        self._anim_data = {
+            "move": move,
+            "from_square": from_sq,
+            "to_square": to_sq,
+            "piece_symbol": self.UNICODE_PIECES[piece.symbol()],
+            "frames": frames,
+            "frame": 0,
+        }
+        self._animating = True
+        # recalc interval in case fps changed
+        self._anim_frame_interval_ms = int(1000 / max(1, self.animation_fps))
+        # schedule first frame
+        self._schedule_next_frame()
+
+    def _schedule_next_frame(self):
+        if not self._animating or self._anim_data is None:
+            return
+        # ensure previous after id cleared
+        if self._anim_after_id:
+            try:
+                self.after_cancel(self._anim_after_id)
+            except Exception:
+                pass
+            self._anim_after_id = None
+        self._anim_after_id = self.after(self._anim_frame_interval_ms, self._animate_step)
+
+    def _animate_step(self):
+        """One animation tick; commit move when finished."""
+        self._anim_after_id = None
+        if not self._animating or self._anim_data is None:
+            return
+
+        self._anim_data["frame"] += 1
+        frame = self._anim_data["frame"]
+        frames = self._anim_data["frames"]
+
+        # redraw shows the current animated position
+        try:
+            self.redraw()
+        except Exception:
+            pass
+
+        if frame < frames:
+            # continue animation
+            self._schedule_next_frame()
+            return
+
+        # finished: commit the move to board (use DisplayBoard.push to bypass override)
+        move = self._anim_data.get("move")
+        try:
+            DisplayBoard.push(self, move)
+        except Exception:
+            try:
+                super().push(move)
+            except Exception:
+                pass
+
+        # clear animation state
+        self._animating = False
+        self._anim_data = None
+        self._anim_after_id = None
+
+        # final redraw of committed state
+        try:
+            self.redraw()
+        except Exception:
+            pass
+
+    # --------------------
+    # Draw override to render animated piece on top
+    # --------------------
+    @override
+    def _draw_pieces(self):
+        """Draw all pieces on the board using Unicode symbols."""
+        for r in range(8):
+            for c in range(8):
+                square = chess.square(c, 7 - r)
+                piece = self.piece_at(square)
+                # skip drawing the piece currently being dragged at its origin square
+                if piece == self._dragging_piece and square == self._selected_square:
+                    continue
+                if self._anim_data:
+                    if square == self._anim_data["from_square"]:continue
+                if piece:
+                    symbol = DisplayBoard.UNICODE_PIECES[piece.symbol()]
+                    draw_r, draw_c = r, c
+                    if self.flipped:
+                        draw_r, draw_c = 7 - r, 7 - c
+                    x_center = draw_c * self.square_size + self.square_size // 2
+                    y_center = draw_r * self.square_size + self.square_size // 2
+                    self.canvas.create_text(x_center, y_center, text=symbol, font=self.font, fill="black")
+
+    @override
+    def redraw(self):
+        """Render board then draw moving piece (if animating)."""
+        # parent draws board/pieces/overlays
+        super().redraw()
+
+        if not self._animating or not self._anim_data:
+            return
+
+        ad = self._anim_data
+        frm = ad["from_square"]
+        to = ad["to_square"]
+        frame = ad["frame"]
+        frames = ad["frames"]
+        symbol = ad["piece_symbol"]
+
+        # compute centers
+        cx_from, cy_from = self.square_center(frm)
+        cx_to, cy_to = self.square_center(to)
+
+        # Normalise t in [0,1]. Use frames-1 so final frame lands exactly on dest.
+        t = min(1.0, max(0.0, frame / max(1, frames - 1))) if frames > 1 else 1.0
+        t_eased = self._ease_out_quad(t)
+
+        cur_x = cx_from + (cx_to - cx_from) * t_eased
+        cur_y = cy_from + (cy_to - cy_from) * t_eased
+
+        # draw moving piece on top
+        self.canvas.create_text(int(cur_x), int(cur_y), text=symbol, font=self.font, fill="black")
+
+    # --------------------
+    # Logic / safety overrides
+    # --------------------
+    @override
+    def push(self, move: chess.Move,animate: bool = True) -> None:
+        """Stop any running animation then start animating this push (or execute immediately if disabled)."""
+        # stop existing animation and commit its move
+        self.stop_animation()
+
+        # If animations disabled -> immediate
+        if not self.allow_animation or not animate:
+            return DisplayBoard.push(self, move)
+
+        # start this animation (kills any previous).
+
+        self._start_move_animation(move)
+        return None
+
+    @override
+    def pop(self) -> Optional[chess.Move]:
+        self.stop_animation()
+        return DisplayBoard.pop(self)
+
+    @override
+    def flip_board(self):
+        self.stop_animation()
+        return DisplayBoard.flip_board(self)
+
+    # --------------------
+    # Event handler overrides (stop anim then delegate)
+    # --------------------
+    @override
+    def _tk_left_click(self, event):
+        self.stop_animation()
+        return super()._tk_left_click(event)
+
+    @override
+    def _tk_right_down(self, event):
+        self.stop_animation()
+        return super()._tk_right_down(event)
+
+    @override
+    def _tk_left_up(self, event):
+        """Finish dragging a piece (if any) and attempt to perform the move."""
+        if not self.allow_input:
+            return
+        self.clear_board_draw()
+        if self._dragging_piece is None:
+            return
+        to_square = self.square_at(event.x + self._dragging_offset[0], event.y + self._dragging_offset[1])
+        if to_square is not None:
+            if self.make_move(self._selected_square, to_square,animate=False):
+                self._selected_square = None
+        self._dragging_piece = None
+        self._show_selected()
+        self.redraw()
+    # Ensure make_move uses animated push path
+
+    @override
+    def make_move(self, from_square, to_square, promo_piece=None, callback: bool = True,animate: bool = True) -> Optional[chess.Move]:
+        """Attempt to make a move; if legal, call push (which will animate or execute immediately)."""
+        if from_square is None or to_square is None:
+            return None
+
+        # promotion handling (delegate to parent semantics)
+        if promo_piece is None and self._is_promotion(from_square, to_square) and \
+                any(chess.Move(from_square, to_square, p) in self.legal_moves
+                    for p in (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT)):
+            self._waiting_move = chess.Move(from_square, to_square)
+            self._promotion_active = True
+            return None
+
+        move = chess.Move(from_square, to_square, promotion=promo_piece)
+        if move in self.legal_moves:
+            # push will handle animation
+            self.push(move,animate)
+            if callback:
+                for cb in self._move_callbacks:
+                    try:
+                        cb(move, self)
+                    except Exception:
+                        pass
+            return move
+        return None
 
 if __name__ == '__main__':
     import sys
 
     # Example usage: run the module and pass an optional FEN on command line.
     root = tk.Tk()
-    d = DisplayBoard(root)
+    d = AnimatedDisplayBoard(root)
     d.config(borderwidth=5, bg="#000")
     d.pack()
     if len(sys.argv) > 1:
